@@ -1,0 +1,728 @@
+-- Business Requirements Document (BRD): Informatica PowerCenter to Snowflake Migration
+-- Repository: Rep_Snowflake_Migration
+-- Folder: MIGRATION_PROJECT
+-- Source Database Type: Oracle
+-- Target Platform: Snowflake (ANALYSIS.PUBLIC)
+-- Informatica Version: 10.5.0
+-- Document Date: 2026-07-13
+-- Scope: All 13 PowerCenter mappings in the new-mapping branch
+-- ================================================================================
+--
+-- ################################################################################
+-- TABLE OF CONTENTS
+-- ################################################################################
+-- 1. Executive Summary
+-- 2. Mapping #1: m_stg_to_dim_employees_standard
+-- 3. Mapping #2: m_sales_perf_routing_complex
+-- 4. Mapping #3: m_customer_scd2_enterprise
+-- 5. Mapping #4: m_txn_state_tracking_complex
+-- 6. Mapping #5: m_hierarchical_xml_generation
+-- 7. Mapping #6: m_dynamic_incremental_partitioning
+-- 8. Mapping #7: m_transaction_denormalization
+-- 9. Mapping #8: m_conditional_lookup_bypass
+-- 10. Mapping #9: m_multi_target_clearinghouse
+-- 11. Mapping #10: m_priority_deduplication
+-- 12. Mapping #11: m_session_audit_ledger
+-- 13. Mapping #12: m_cascading_fallback_lookup
+-- 14. Mapping #13: m_critical_exception_abort
+-- 15. Source-to-Target Summary Matrix
+-- 16. Dependencies and Prerequisites
+-- 17. Testing and Validation Criteria
+--
+-- ################################################################################
+-- 1. EXECUTIVE SUMMARY
+-- ################################################################################
+--
+-- This BRD documents the migration of all 13 Informatica PowerMart mappings
+-- from the new-mapping branch into native Snowflake SQL stored procedures.
+-- Each mapping has been analyzed and translated into a Snowflake SQL Scripting
+-- procedure that preserves the original business logic and uses Snowflake
+-- native features (window functions, AUTOINCREMENT, LISTAGG, MD5, MERGE, etc.).
+--
+-- Migration Scope:
+--   - 13 Informatica mappings -> 13 Snowflake stored procedures
+--   - Transformation types covered: Source Qualifier, Filter, Expression, Joiner,
+--     Lookup, Aggregator, Router, Update Strategy, Sequence, XML Generator,
+--     Sorter, Update Strategy
+--   - Load patterns: Full refresh, SCD Type 2, Stateful tracking, Conditional
+--     routing, Incremental partition, Hierarchical XML, Deduplication, Audit
+--     ledger, Cascading fallback, Validation/abort
+--
+-- ################################################################################
+-- 2. MAPPING #1: m_stg_to_dim_employees_standard
+-- ################################################################################
+--
+-- SNOWFLAKE PROCEDURE: SP_STG_TO_DIM_EMPLOYEES
+-- COMPLEXITY: Low
+-- LOAD PATTERN: Full Refresh (Truncate & Reload)
+--
+-- 2.1 Business Purpose
+-- Loads active employee records from the staging table into a dimension table,
+-- concatenating first and last names and stamping a load timestamp.
+--
+-- 2.2 Source Tables
+-- | Table         | Schema         | Description                  |
+-- |---------------|----------------|------------------------------|
+-- | STG_EMPLOYEES | ANALYSIS.PUBLIC| Staging employee data        |
+--
+-- Source Columns:
+-- | Column      | Datatype | Precision | Scale | Description         |
+-- |-------------|----------|-----------|-------|---------------------|
+-- | EMP_ID      | INTEGER  | 10        | 0     | Employee identifier |
+-- | FIRST_NAME  | VARCHAR  | 50        | 0     | First name          |
+-- | LAST_NAME   | VARCHAR  | 50        | 0     | Last name           |
+-- | DEPARTMENT  | VARCHAR  | 50        | 0     | Department name     |
+-- | SALARY      | DECIMAL  | 10        | 2     | Employee salary     |
+-- | STATUS      | VARCHAR  | 1         | 0     | A=Active, I=Inactive|
+--
+-- 2.3 Target Tables
+-- | Table         | Schema         | Load Type       |
+-- |---------------|----------------|-----------------|
+-- | DIM_EMPLOYEES | ANALYSIS.PUBLIC| Truncate & Load |
+--
+-- Target Columns:
+-- | Column       | Datatype       | Description                       |
+-- |--------------|----------------|-----------------------------------|
+-- | EMP_ID       | INTEGER        | Employee identifier               |
+-- | FULL_NAME    | VARCHAR(101)   | FIRST_NAME || ' ' || LAST_NAME    |
+-- | DEPARTMENT   | VARCHAR(50)    | Department name                   |
+-- | SALARY       | DECIMAL(10,2)  | Salary                            |
+-- | LAST_UPDATED | TIMESTAMP_NTZ  | Procedure execution timestamp     |
+--
+-- 2.4 Transformation Pipeline
+-- Step 1: SQ_STG_EMPLOYEES (Source Qualifier) - reads all columns.
+-- Step 2: FIL_Active_Employees (Filter) - WHERE STATUS = 'A'.
+-- Step 3: EXP_Transform_Fields (Expression) - FULL_NAME, LAST_UPDATED.
+--
+-- 2.5 Business Rules
+-- BR-1: Only employees with STATUS = 'A' are loaded.
+-- BR-2: FULL_NAME = FIRST_NAME || ' ' || LAST_NAME.
+-- BR-3: LAST_UPDATED is set to CURRENT_TIMESTAMP().
+-- BR-4: Target is fully refreshed (TRUNCATE + INSERT) on each run.
+--
+-- ################################################################################
+-- 3. MAPPING #2: m_sales_perf_routing_complex
+-- ################################################################################
+--
+-- SNOWFLAKE PROCEDURE: SP_SALES_PERF_ROUTING
+-- COMPLEXITY: High
+-- LOAD PATTERN: Full Refresh with Conditional Routing
+--
+-- 3.1 Business Purpose
+-- Joins sales transactions with store data, aggregates revenue by store/region,
+-- calculates a projected bonus using a region multiplier lookup, and routes
+-- stores into HIGH_PERFORMERS and STANDARD_PERFORMERS targets.
+--
+-- 3.2 Source Tables
+-- | Table            | Schema         | Description                     |
+-- |------------------|----------------|---------------------------------|
+-- | SALES            | ANALYSIS.PUBLIC| Sales transactions              |
+-- | STORES           | ANALYSIS.PUBLIC| Store master data               |
+-- | LKP_TARGET_BONUS | ANALYSIS.PUBLIC| Region bonus multiplier lookup  |
+--
+-- SALES Columns: STORE_ID (INTEGER), TXN_ID (INTEGER), REVENUE (DECIMAL(12,2))
+-- STORES Columns: STORE_ID (INTEGER), REGION (VARCHAR(30))
+-- LKP_TARGET_BONUS Columns: REGION (VARCHAR(30)), BONUS_MULTIPLIER (DECIMAL(4,2))
+--
+-- 3.3 Target Tables
+-- | HIGH_PERFORMERS     | STORE_ID, TOTAL_REVENUE, TRANSACTION_COUNT, PROJECTED_BONUS, LOAD_TIMESTAMP |
+-- | STANDARD_PERFORMERS | same structure as HIGH_PERFORMERS                                            |
+--
+-- 3.4 Transformation Pipeline
+-- Step 1: JNR_Sales_Stores - INNER JOIN SALES and STORES on STORE_ID.
+-- Step 2: AGG_Monthly_Perf - GROUP BY STORE_ID, REGION; SUM(REVENUE), COUNT(TXN_ID).
+-- Step 3: LKP_Target_Bonus - LEFT JOIN LKP_TARGET_BONUS on REGION.
+-- Step 4: EXP_Final_Calc - PROJECTED_BONUS = TOTAL_REVENUE * COALESCE(BONUS_MULTIPLIER,1).
+-- Step 5: RTR_Performance_Split - Route TOTAL_REVENUE >= 100000 to HIGH_PERFORMERS,
+--         all others to STANDARD_PERFORMERS.
+--
+-- 3.5 Business Rules
+-- BR-1: Only stores with matching sales records are included (INNER JOIN).
+-- BR-2: Aggregation is at STORE_ID + REGION level.
+-- BR-3: Missing bonus multiplier defaults to 1.
+-- BR-4: High performer threshold = 100,000.
+-- BR-5: Both target tables are truncated before each run.
+--
+-- ################################################################################
+-- 4. MAPPING #3: m_customer_scd2_enterprise
+-- ################################################################################
+--
+-- SNOWFLAKE PROCEDURE: SP_CUSTOMER_SCD2
+-- COMPLEXITY: Very High
+-- LOAD PATTERN: SCD Type 2
+--
+-- 4.1 Business Purpose
+-- Maintains a Type 2 Slowly Changing Dimension for customers. Detects new and
+-- changed records via MD5 hash comparison, expires old versions, and inserts
+-- new active versions while preserving history.
+--
+-- 4.2 Source Tables
+-- | STG_CUSTOMERS | ANALYSIS.PUBLIC | Customer staging data |
+-- | STG_REGIONS   | ANALYSIS.PUBLIC | Region reference used for join/filter |
+--
+-- Source Qualifier SQL:
+--   SELECT stg.CUSTOMER_ID, stg.CUSTOMER_NAME, stg.ADDRESS, stg.PHONE, stg.TIER
+--   FROM STG_CUSTOMERS stg
+--   INNER JOIN STG_REGIONS r ON stg.REGION_ID = r.REGION_ID
+--   WHERE stg.EMAIL IS NOT NULL
+--
+-- 4.3 Target Tables
+-- | DIM_CUSTOMER | ANALYSIS.PUBLIC | SCD Type 2 dimension |
+--
+-- Target Columns:
+-- | CUSTOMER_SK    | INTEGER (AUTOINCREMENT) | Surrogate key                    |
+-- | CUSTOMER_ID    | INTEGER                 | Natural key                      |
+-- | CUSTOMER_NAME  | VARCHAR(100)            | Customer name                    |
+-- | ADDRESS        | VARCHAR(250)            | Mailing address                  |
+-- | PHONE          | VARCHAR(20)             | Phone number                     |
+-- | TIER           | VARCHAR(10)             | Customer tier                    |
+-- | ROW_HASH_MD5   | VARCHAR(32)             | MD5 hash of ADDRESS, PHONE, TIER |
+-- | IS_ACTIVE      | CHAR(1)                 | 'Y'=current, 'N'=expired         |
+-- | EFF_START_DATE | TIMESTAMP_NTZ           | Version start                    |
+-- | EFF_END_DATE   | TIMESTAMP_NTZ           | NULL when current                |
+-- | LOAD_TIMESTAMP | TIMESTAMP_NTZ           | ETL load timestamp               |
+--
+-- 4.4 Transformation Pipeline
+-- Step 1: SQ_STG_CUSTOMERS - INNER JOIN STG_REGIONS and filter EMAIL IS NOT NULL.
+-- Step 2: LKP_Dim_Customer - LEFT JOIN DIM_CUSTOMER (IS_ACTIVE='Y') on CUSTOMER_ID.
+-- Step 3: EXP_SCD_Logic - Compute MD5 hash; set IS_NEW_RECORD and IS_CHANGED_RECORD.
+-- Step 4: RTR_SCD_Rows - INSERT_NEW, INSERT_UPDATE, UPDATE_OLD groups.
+-- Step 5: UPD_Old_Version - UPDATE IS_ACTIVE='N' and EFF_END_DATE for changed records.
+-- Step 6: SEQ_Cust_Key - AUTOINCREMENT on CUSTOMER_SK.
+--
+-- 4.5 Business Rules
+-- BR-1: Only customers with a non-NULL email and valid REGION_ID are processed.
+-- BR-2: Change detection uses MD5 hash of ADDRESS, PHONE, TIER.
+-- BR-3: CUSTOMER_NAME changes do NOT trigger a new version.
+-- BR-4: New customers -> INSERT with IS_ACTIVE='Y'.
+-- BR-5: Changed customers -> Expire old row, INSERT new version.
+-- BR-6: Unchanged customers -> SKIP.
+-- BR-7: At any point, each CUSTOMER_ID has exactly one active row.
+--
+-- ################################################################################
+-- 5. MAPPING #4: m_txn_state_tracking_complex
+-- ################################################################################
+--
+-- SNOWFLAKE PROCEDURE: SP_TXN_STATE_TRACKING
+-- COMPLEXITY: High
+-- LOAD PATTERN: Full Refresh (Stateful Row Comparison)
+--
+-- 5.1 Business Purpose
+-- Processes transactions ordered by ACCOUNT_ID and TXN_DATE, detects state
+-- transitions (when an account's STATUS changes between consecutive transactions),
+-- and outputs only the state-change events.
+--
+-- 5.2 Source Tables
+-- | STG_TXNS | ANALYSIS.PUBLIC | Transaction staging table |
+--
+-- Source Columns: ACCOUNT_ID (INTEGER), TXN_DATE (TIMESTAMP_NTZ), STATUS (VARCHAR(10)),
+--                 AMOUNT (DECIMAL(15,2))
+--
+-- Source Qualifier SQL:
+--   SELECT ACCOUNT_ID, TXN_DATE, STATUS, AMOUNT FROM STG_TXNS
+--   ORDER BY ACCOUNT_ID, TXN_DATE ASC
+--
+-- 5.3 Target Tables
+-- | TXN_STATE_CHANGES | ANALYSIS.PUBLIC | Truncate & Load |
+--
+-- Target Columns: ACCOUNT_ID, TXN_DATE, STATUS, AMOUNT, PREV_STATUS,
+--                 STATE_CHANGED_FLAG, LOAD_TIMESTAMP
+--
+-- 5.4 Transformation Pipeline
+-- Step 1: SQ_STG_TXNS - SELECT and ORDER BY ACCOUNT_ID, TXN_DATE ASC.
+-- Step 2: EXP_State_Engine - Variable ports V_PREV_ACCOUNT_ID, V_PREV_STATUS
+--         translated to LAG() window functions.
+--         STATE_CHANGED_FLAG = 1 when first row of account or STATUS changes.
+-- Step 3: RTR_State_Changes - WHERE STATE_CHANGED_FLAG = 1.
+--
+-- 5.5 Business Rules
+-- BR-1: Ordering is critical for stateful comparison.
+-- BR-2: First transaction per account is always a state change.
+-- BR-3: Subsequent rows are output only when STATUS differs from the previous row.
+-- BR-4: PREV_STATUS is NULL for the first row of each account.
+-- BR-5: Target is fully refreshed on each run.
+--
+-- ################################################################################
+-- 6. MAPPING #5: m_hierarchical_xml_generation
+-- ################################################################################
+--
+-- SNOWFLAKE PROCEDURE: SP_HIERARCHICAL_XML_GENERATION
+-- COMPLEXITY: Medium
+-- LOAD PATTERN: Full Refresh (Hierarchical XML Construction)
+--
+-- 6.1 Business Purpose
+-- Joins order headers with line items and builds one hierarchical XML payload
+-- per order, containing nested <Item> elements.
+--
+-- 6.2 Source Tables
+-- | ORDERS      | ANALYSIS.PUBLIC | Order headers  |
+-- | ORDER_ITEMS | ANALYSIS.PUBLIC | Order line items |
+--
+-- ORDERS Columns: ORDER_ID (INTEGER), CUST_ID (INTEGER), ORDER_DATE (TIMESTAMP_NTZ)
+-- ORDER_ITEMS Columns: ORDER_ID (INTEGER), ITEM_ID (INTEGER), PRODUCT_SKU (VARCHAR(50)),
+--                      QTY (INTEGER)
+--
+-- 6.3 Target Tables
+-- | ORDER_XML_PAYLOADS | ANALYSIS.PUBLIC | Truncate & Load |
+--
+-- Target Columns: ORDER_ID, CUSTOMER_ID, ORDER_DATE, XML_PAYLOAD, LOAD_TIMESTAMP
+--
+-- 6.4 Transformation Pipeline
+-- Step 1: JNR_Orders_Items - INNER JOIN ORDERS and ORDER_ITEMS on ORDER_ID.
+-- Step 2: XMLG_Order_Payload - GROUP BY ORDER_ID, CUST_ID, ORDER_DATE;
+--         LISTAGG() concatenates nested <Item> elements.
+--
+-- 6.5 Output XML Structure
+--   <Order>
+--     <OrderId>{ORDER_ID}</OrderId>
+--     <CustomerId>{CUST_ID}</CustomerId>
+--     <OrderDate>{ORDER_DATE}</OrderDate>
+--     <Items>
+--       <Item><ItemNumber>{ITEM_ID}</ItemNumber><SKU>{PRODUCT_SKU}</SKU><Quantity>{QTY}</Quantity></Item>
+--     </Items>
+--   </Order>
+--
+-- 6.6 Business Rules
+-- BR-1: Only orders with at least one line item are included (INNER JOIN).
+-- BR-2: Items are ordered by ITEM_ID within the XML.
+-- BR-3: One XML payload per ORDER_ID.
+-- BR-4: NULL PRODUCT_SKU is rendered as an empty string.
+-- BR-5: ORDER_DATE formatted as ISO 8601 (YYYY-MM-DD"T"HH24:MI:SS).
+--
+-- ################################################################################
+-- 7. MAPPING #6: m_dynamic_incremental_partitioning
+-- ################################################################################
+--
+-- SNOWFLAKE PROCEDURE: SP_DYNAMIC_INCREMENTAL_PARTITIONING
+-- COMPLEXITY: Medium
+-- LOAD PATTERN: Incremental (date watermark window)
+--
+-- 7.1 Business Purpose
+-- Loads a specific date window of sales history into an incremental fact table.
+-- The procedure accepts low and high watermark dates as parameters.
+--
+-- 7.2 Source Tables
+-- | STG_SALES_HIST | ANALYSIS.PUBLIC | Historical sales staging |
+--
+-- Source Columns: SALE_ID (INTEGER), SALE_DATE (TIMESTAMP_NTZ), AMOUNT (DECIMAL(15,2))
+--
+-- Source Qualifier Override:
+--   WHERE SALE_DATE >= TO_DATE('$$SET_LOW_WATERMARK','YYYY-MM-DD')
+--     AND SALE_DATE <  TO_DATE('$$SET_HIGH_WATERMARK','YYYY-MM-DD')
+--
+-- 7.3 Target Tables
+-- | SALES_FACT_INCREMENTAL | ANALYSIS.PUBLIC | Incremental load |
+--
+-- Target Columns: SALE_ID, SALE_DATE, AMOUNT, LOAD_TIMESTAMP
+--
+-- 7.4 Transformation Pipeline
+-- Step 1: SQ_STG_SALES_HIST - SELECT with date range filter.
+-- Step 2: Map Informatica parameters $$SET_LOW_WATERMARK and $$SET_HIGH_WATERMARK
+--         to procedure arguments SET_LOW_WATERMARK and SET_HIGH_WATERMARK.
+--
+-- 7.5 Business Rules
+-- BR-1: Low watermark is inclusive, high watermark is exclusive.
+-- BR-2: Existing rows within the window are deleted before insert (idempotent).
+-- BR-3: LOAD_TIMESTAMP is set to CURRENT_TIMESTAMP().
+--
+-- ################################################################################
+-- 8. MAPPING #7: m_transaction_denormalization
+-- ################################################################################
+--
+-- SNOWFLAKE PROCEDURE: SP_TRANSACTION_DENORMALIZATION
+-- COMPLEXITY: Medium
+-- LOAD PATTERN: Full Refresh (Conditional Aggregate Pivot)
+--
+-- 8.1 Business Purpose
+-- Denormalizes invoice line items by pivoting LINE_TYPE categories into columns.
+--
+-- 8.2 Source Tables
+-- | STG_INVOICE_LINES | ANALYSIS.PUBLIC | Invoice line items |
+--
+-- Source Columns: INVOICE_ID (INTEGER), LINE_TYPE (VARCHAR(20)),
+--                 LINE_AMOUNT (DECIMAL(15,2))
+--
+-- 8.3 Target Tables
+-- | INVOICE_DENORMALIZED | ANALYSIS.PUBLIC | Truncate & Load |
+--
+-- Target Columns: INVOICE_ID, TOTAL_TAX_AMT, TOTAL_ITEM_AMT, TOTAL_FREIGHT_AMT,
+--                 LOAD_TIMESTAMP
+--
+-- 8.4 Transformation Pipeline
+-- Step 1: AGG_Pivot_Lines - GROUP BY INVOICE_ID.
+--         TOTAL_TAX_AMT     = SUM(IFF(LINE_TYPE='TAX',     LINE_AMOUNT, 0))
+--         TOTAL_ITEM_AMT    = SUM(IFF(LINE_TYPE='ITEM',    LINE_AMOUNT, 0))
+--         TOTAL_FREIGHT_AMT = SUM(IFF(LINE_TYPE='FREIGHT', LINE_AMOUNT, 0))
+--
+-- 8.5 Business Rules
+-- BR-1: Each invoice produces exactly one output row.
+-- BR-2: Unrecognized LINE_TYPE values contribute to no category total.
+-- BR-3: Target is fully refreshed before each run.
+--
+-- ################################################################################
+-- 9. MAPPING #8: m_conditional_lookup_bypass
+-- ################################################################################
+--
+-- SNOWFLAKE PROCEDURE: SP_CONDITIONAL_LOOKUP_BYPASS
+-- COMPLEXITY: Medium
+-- LOAD PATTERN: Conditional Lookup Bypass
+--
+-- 9.1 Business Purpose
+-- Routes transaction lines based on LINE_STATUS. Reversed or adjusted lines are
+-- enriched with the original value from FACT_TRANSACTION_HISTORY; all other lines
+-- bypass the lookup.
+--
+-- 9.2 Source Tables
+-- | STG_TXN_LINES         | ANALYSIS.PUBLIC | Transaction lines        |
+-- | FACT_TRANSACTION_HISTORY | ANALYSIS.PUBLIC | Historical transaction lookup |
+--
+-- STG_TXN_LINES Columns: TXN_ID (INTEGER), LINE_STATUS (VARCHAR(10)),
+--                        AMOUNT (DECIMAL(15,2))
+-- FACT_TRANSACTION_HISTORY Columns: HIST_TXN_ID (INTEGER), ORIGINAL_VAL (DECIMAL(15,2))
+--
+-- 9.3 Target Tables
+-- | TXN_STRAIGHT_THROUGH | ANALYSIS.PUBLIC | Truncate & Load for bypassed rows |
+-- | TXN_HIST_LOOKUP      | ANALYSIS.PUBLIC | Truncate & Load for lookup rows  |
+--
+-- TXN_STRAIGHT_THROUGH Columns: TXN_ID, LINE_STATUS, AMOUNT, LOAD_TIMESTAMP
+-- TXN_HIST_LOOKUP Columns: TXN_ID, LINE_STATUS, AMOUNT, ORIGINAL_VAL, LOAD_TIMESTAMP
+--
+-- 9.4 Transformation Pipeline
+-- Step 1: RTR_Bypass_Check - Group NEED_HIST_LOOKUP: LINE_STATUS IN ('REVERSED','ADJUSTED')
+--                            Group STRAIGHT_THROUGH: DEFAULT
+-- Step 2: LKP_Transaction_History - LEFT JOIN FACT_TRANSACTION_HISTORY on HIST_TXN_ID = TXN_ID.
+-- Step 3: COALESCE(ORIGINAL_VAL, AMOUNT) for looked-up rows.
+--
+-- 9.5 Business Rules
+-- BR-1: Reversed and adjusted rows require historical lookup.
+-- BR-2: Straight-through rows do not perform lookup.
+-- BR-3: If lookup does not match, ORIGINAL_VAL defaults to AMOUNT.
+-- BR-4: Both target tables are truncated before each run.
+--
+-- ################################################################################
+-- 10. MAPPING #9: m_multi_target_clearinghouse
+-- ################################################################################
+--
+-- SNOWFLAKE PROCEDURE: SP_MULTI_TARGET_CLEARINGHOUSE
+-- COMPLEXITY: Medium
+-- LOAD PATTERN: Multi-Target Router (non-exclusive groups)
+--
+-- 10.1 Business Purpose
+-- Routes risk records to multiple target tables based on country and risk score.
+-- Router groups are not mutually exclusive, so a row may be written to more than
+-- one target.
+--
+-- 10.2 Source Tables
+-- | STG_CLEARINGHOUSE | ANALYSIS.PUBLIC | Risk records |
+--
+-- Source Columns: RECORD_ID (INTEGER), COUNTRY_CODE (VARCHAR(3)),
+--                 RISK_SCORE (INTEGER)
+--
+-- 10.3 Target Tables
+-- | CLEARINGHOUSE_DOMESTIC_HIGH_RISK | Truncate & Load |
+-- | CLEARINGHOUSE_INTERNATIONAL      | Truncate & Load |
+-- | CLEARINGHOUSE_AUDIT_LOG          | Truncate & Load |
+--
+-- Target Columns (all three): RECORD_ID, COUNTRY_CODE, RISK_SCORE, LOAD_TIMESTAMP
+--
+-- 10.4 Transformation Pipeline
+-- Step 1: RTR_Data_Clearinghouse
+--         Group GRP_DOMESTIC_HIGH_RISK: COUNTRY_CODE = 'USA' AND RISK_SCORE > 80
+--         Group GRP_INTERNATIONAL:       COUNTRY_CODE != 'USA'
+--         Group GRP_AUDIT_LOG:           RISK_SCORE > 50
+-- Step 2: Three separate INSERT statements, one per group.
+--
+-- 10.5 Business Rules
+-- BR-1: USA records with RISK_SCORE > 80 go to CLEARINGHOUSE_DOMESTIC_HIGH_RISK.
+-- BR-2: Non-USA records go to CLEARINGHOUSE_INTERNATIONAL.
+-- BR-3: All records with RISK_SCORE > 50 go to CLEARINGHOUSE_AUDIT_LOG.
+-- BR-4: Groups can overlap; a single source row may be inserted into multiple targets.
+-- BR-5: All target tables are truncated before each run.
+--
+-- ################################################################################
+-- 11. MAPPING #10: m_priority_deduplication
+-- ################################################################################
+--
+-- SNOWFLAKE PROCEDURE: SP_PRIORITY_DEDUPLICATION
+-- COMPLEXITY: Low
+-- LOAD PATTERN: Full Refresh (Deduplication with Priority)
+--
+-- 11.1 Business Purpose
+-- Deduplicates leads by CUSTOMER_ID, keeping the lead with the newest UPDATED_AT
+-- (highest priority).
+--
+-- 11.2 Source Tables
+-- | STG_LEADS | ANALYSIS.PUBLIC | Lead records |
+--
+-- Source Columns: CUSTOMER_ID (INTEGER), LEAD_SOURCE (VARCHAR(30)),
+--                 UPDATED_AT (TIMESTAMP_NTZ)
+--
+-- 11.3 Target Tables
+-- | LEADS_PRIORITY | ANALYSIS.PUBLIC | Truncate & Load |
+--
+-- Target Columns: CUSTOMER_ID, LEAD_SOURCE, UPDATED_AT, LOAD_TIMESTAMP
+--
+-- 11.4 Transformation Pipeline
+-- Step 1: SRT_Order_Priority - ORDER BY CUSTOMER_ID ASC, UPDATED_AT DESC.
+-- Step 2: AGG_Keep_First - Keep the first row per CUSTOMER_ID (newest UPDATED_AT).
+--         Snowflake: QUALIFY ROW_NUMBER() OVER (PARTITION BY CUSTOMER_ID ORDER BY UPDATED_AT DESC) = 1
+--
+-- 11.5 Business Rules
+-- BR-1: One output row per CUSTOMER_ID.
+-- BR-2: The output row is the lead with the newest UPDATED_AT.
+-- BR-3: Target is fully refreshed before each run.
+--
+-- ################################################################################
+-- 12. MAPPING #11: m_session_audit_ledger
+-- ################################################################################
+--
+-- SNOWFLAKE PROCEDURE: SP_SESSION_AUDIT_LEDGER
+-- COMPLEXITY: Low
+-- LOAD PATTERN: Audit Ledger (Append)
+--
+-- 12.1 Business Purpose
+-- Captures session-level audit metrics from a staging table into an audit ledger.
+-- The procedure supports an optional session id/name to reflect pre/post-session
+-- variables used in the Informatica mapping.
+--
+-- 12.2 Source Tables
+-- | STG_AUDIT_METRICS | ANALYSIS.PUBLIC | Audit metrics |
+--
+-- Source Columns: METRIC_ID (INTEGER), VALUE (DECIMAL(15,4))
+--
+-- 12.3 Target Tables
+-- | AUDIT_LEDGER | ANALYSIS.PUBLIC | Append |
+--
+-- Target Columns: SESSION_ID, SESSION_NAME, METRIC_ID, VALUE, LOAD_TIMESTAMP
+--
+-- 12.4 Transformation Pipeline
+-- Step 1: SQ_CORE_DATA - read METRIC_ID and VALUE.
+-- Step 2: Generate a UUID session id when not provided.
+-- Step 3: Append all metrics to AUDIT_LEDGER with the session id and timestamp.
+--
+-- 12.5 Business Rules
+-- BR-1: Each execution creates a distinct session if P_SESSION_ID is not supplied.
+-- BR-2: The procedure appends rows; it does not truncate the audit ledger.
+-- BR-3: LOAD_TIMESTAMP is set to CURRENT_TIMESTAMP().
+--
+-- ################################################################################
+-- 13. MAPPING #12: m_cascading_fallback_lookup
+-- ################################################################################
+--
+-- SNOWFLAKE PROCEDURE: SP_CASCADING_FALLBACK_LOOKUP
+-- COMPLEXITY: Medium
+-- LOAD PATTERN: Cascading Fallback Lookup
+--
+-- 13.1 Business Purpose
+-- Resolves a source key to a customer identifier by first looking up the active
+-- customer cache, then the archive cache, and finally defaulting to -1 if no
+-- match is found.
+--
+-- 13.2 Source Tables
+-- | STG_CUSTOMER_KEYS     | ANALYSIS.PUBLIC | Source keys to resolve |
+-- | DIM_CUSTOMER_ACTIVE   | ANALYSIS.PUBLIC | Active customer cache  |
+-- | DIM_CUSTOMER_ARCHIVE  | ANALYSIS.PUBLIC | Archive customer cache |
+--
+-- STG_CUSTOMER_KEYS Columns: SRC_KEY (VARCHAR(50))
+-- DIM_CUSTOMER_ACTIVE Columns: SRC_KEY (VARCHAR(50)), ACTIVE_ID (INTEGER)
+-- DIM_CUSTOMER_ARCHIVE Columns: SRC_KEY (VARCHAR(50)), ARCHIVE_ID (INTEGER)
+--
+-- 13.3 Target Tables
+-- | CUSTOMER_RESOLVED | ANALYSIS.PUBLIC | Truncate & Load |
+--
+-- Target Columns: SRC_KEY, ACTIVE_ID, ARCHIVE_ID, FINAL_ID, LOAD_TIMESTAMP
+--
+-- 13.4 Transformation Pipeline
+-- Step 1: LKP_Active_Cache - LEFT JOIN DIM_CUSTOMER_ACTIVE on SRC_KEY.
+-- Step 2: LKP_Archive_Cache - LEFT JOIN DIM_CUSTOMER_ARCHIVE on SRC_KEY.
+-- Step 3: EXP_Evaluate_Fallback - FINAL_ID = COALESCE(ACTIVE_ID, ARCHIVE_ID, -1).
+--
+-- 13.5 Business Rules
+-- BR-1: Use ACTIVE_ID when available.
+-- BR-2: Fall back to ARCHIVE_ID when active id is not found.
+-- BR-3: Default to -1 when neither cache matches.
+-- BR-4: Target is fully refreshed before each run.
+--
+-- ################################################################################
+-- 14. MAPPING #13: m_critical_exception_abort
+-- ################################################################################
+--
+-- SNOWFLAKE PROCEDURE: SP_CRITICAL_EXCEPTION_ABORT
+-- COMPLEXITY: Low
+-- LOAD PATTERN: Data Integrity Validation with Abort
+--
+-- 14.1 Business Purpose
+-- Validates batch balance records and aborts the load if any batch has a
+-- negative total balance.
+--
+-- 14.2 Source Tables
+-- | STG_BATCH_BALANCE | ANALYSIS.PUBLIC | Batch balance data |
+--
+-- Source Columns: BATCH_ID (INTEGER), TOTAL_BALANCE (DECIMAL(15,2))
+--
+-- 14.3 Target Tables
+-- | BATCH_VALIDATED | ANALYSIS.PUBLIC | Truncate & Load (only when validation passes) |
+--
+-- Target Columns: BATCH_ID, TOTAL_BALANCE, VALIDATION_STATUS, LOAD_TIMESTAMP
+--
+-- 14.4 Transformation Pipeline
+-- Step 1: EXP_Sanity_Check - IIF(TOTAL_BALANCE < 0, ABORT(...), 'Y')
+-- Step 2: If any negative balance found, raise a custom exception.
+-- Step 3: If validation passes, insert all rows into BATCH_VALIDATED with 'PASSED'.
+--
+-- 14.5 Business Rules
+-- BR-1: Any TOTAL_BALANCE < 0 causes the procedure to abort.
+-- BR-2: If no negative balances, all rows are loaded with VALIDATION_STATUS='PASSED'.
+-- BR-3: Target is truncated before the successful load.
+--
+-- ################################################################################
+-- 15. SOURCE-TO-TARGET SUMMARY MATRIX
+-- ################################################################################
+--
+-- | # | Informatica Mapping              | Snowflake Procedure             | Source Tables | Target Tables | Load Pattern |
+-- |---|----------------------------------|---------------------------------|---------------|---------------|--------------|
+-- | 1 | m_stg_to_dim_employees_standard  | SP_STG_TO_DIM_EMPLOYEES         | STG_EMPLOYEES | DIM_EMPLOYEES | Truncate & Reload |
+-- | 2 | m_sales_perf_routing_complex     | SP_SALES_PERF_ROUTING           | SALES, STORES, LKP_TARGET_BONUS | HIGH_PERFORMERS, STANDARD_PERFORMERS | Truncate & Reload + Routing |
+-- | 3 | m_customer_scd2_enterprise       | SP_CUSTOMER_SCD2                | STG_CUSTOMERS, STG_REGIONS | DIM_CUSTOMER | SCD Type 2 |
+-- | 4 | m_txn_state_tracking_complex     | SP_TXN_STATE_TRACKING           | STG_TXNS | TXN_STATE_CHANGES | Truncate & Reload |
+-- | 5 | m_hierarchical_xml_generation    | SP_HIERARCHICAL_XML_GENERATION  | ORDERS, ORDER_ITEMS | ORDER_XML_PAYLOADS | Truncate & Reload |
+-- | 6 | m_dynamic_incremental_partitioning | SP_DYNAMIC_INCREMENTAL_PARTITIONING | STG_SALES_HIST | SALES_FACT_INCREMENTAL | Incremental Window |
+-- | 7 | m_transaction_denormalization    | SP_TRANSACTION_DENORMALIZATION  | STG_INVOICE_LINES | INVOICE_DENORMALIZED | Truncate & Reload |
+-- | 8 | m_conditional_lookup_bypass      | SP_CONDITIONAL_LOOKUP_BYPASS    | STG_TXN_LINES, FACT_TRANSACTION_HISTORY | TXN_STRAIGHT_THROUGH, TXN_HIST_LOOKUP | Conditional Lookup |
+-- | 9 | m_multi_target_clearinghouse     | SP_MULTI_TARGET_CLEARINGHOUSE   | STG_CLEARINGHOUSE | CLEARINGHOUSE_DOMESTIC_HIGH_RISK, CLEARINGHOUSE_INTERNATIONAL, CLEARINGHOUSE_AUDIT_LOG | Multi-Target Router |
+-- | 10 | m_priority_deduplication        | SP_PRIORITY_DEDUPLICATION       | STG_LEADS | LEADS_PRIORITY | Truncate & Reload |
+-- | 11 | m_session_audit_ledger          | SP_SESSION_AUDIT_LEDGER         | STG_AUDIT_METRICS | AUDIT_LEDGER | Append |
+-- | 12 | m_cascading_fallback_lookup     | SP_CASCADING_FALLBACK_LOOKUP    | STG_CUSTOMER_KEYS, DIM_CUSTOMER_ACTIVE, DIM_CUSTOMER_ARCHIVE | CUSTOMER_RESOLVED | Truncate & Reload |
+-- | 13 | m_critical_exception_abort      | SP_CRITICAL_EXCEPTION_ABORT     | STG_BATCH_BALANCE | BATCH_VALIDATED | Truncate & Reload (when passed) |
+--
+-- Transformation Type Coverage:
+-- | Informatica Transformation | Snowflake Equivalent | Used in Mappings |
+-- |----------------------------|----------------------|------------------|
+-- | Source Qualifier | FROM / custom SELECT | 1, 2, 3, 4, 5, 6, 7, 11 |
+-- | Filter | WHERE clause | 1 |
+-- | Expression | SELECT expressions / CASE / IFF | 1, 2, 3, 4, 7, 8, 10, 12, 13 |
+-- | Joiner | INNER JOIN / LEFT JOIN | 2, 3, 5, 8, 12 |
+-- | Lookup | LEFT JOIN to reference table | 2, 3, 8, 12 |
+-- | Aggregator | GROUP BY + SUM/COUNT | 2, 7, 10 |
+-- | Router | Multiple INSERTs with WHERE | 2, 4, 8, 9 |
+-- | Update Strategy | UPDATE statement | 3 |
+-- | Sequence Generator | AUTOINCREMENT column | 3 |
+-- | XML Generator | LISTAGG + string concatenation | 5 |
+-- | Sorter | ORDER BY / ROW_NUMBER | 10 |
+-- | Variable Ports (stateful) | LAG() window functions | 4 |
+-- | ABORT | RAISE custom EXCEPTION | 13 |
+--
+-- ################################################################################
+-- 16. DEPENDENCIES AND PREREQUISITES
+-- ################################################################################
+--
+-- 16.1 Execution Order Dependencies
+--   - Most procedures are independent and can run in parallel.
+--   - SP_CASCADING_FALLBACK_LOOKUP depends on DIM_CUSTOMER_ACTIVE and
+--     DIM_CUSTOMER_ARCHIVE being populated.
+--   - SP_CONDITIONAL_LOOKUP_BYPASS depends on FACT_TRANSACTION_HISTORY being
+--     populated.
+--   - SP_SESSION_AUDIT_LEDGER appends; it should run after source metrics are loaded.
+--
+-- 16.2 Snowflake Environment Prerequisites
+--   - Database: ANALYSIS
+--   - Schema: PUBLIC
+--   - Warehouse: COMPUTE_WH (or appropriately sized warehouse)
+--   - Role privileges:
+--     - CREATE TABLE, CREATE PROCEDURE on ANALYSIS.PUBLIC
+--     - INSERT, UPDATE, TRUNCATE, DELETE on target tables
+--     - SELECT on source tables
+--
+-- 16.3 Snowflake Features Used
+--   - Stored Procedures (SQL Scripting)
+--   - AUTOINCREMENT / IDENTITY columns
+--   - Window functions: LAG(), ROW_NUMBER()
+--   - String functions: MD5(), LISTAGG(), COALESCE(), TO_CHAR()
+--   - Date functions: CURRENT_TIMESTAMP(), TO_DATE()
+--   - SQLROWCOUNT for row count tracking
+--   - EXCEPTION / RAISE for critical validation
+--
+-- ################################################################################
+-- 17. TESTING AND VALIDATION CRITERIA
+-- ################################################################################
+--
+-- 17.1 General Validation (All Procedures)
+--   [ ] Each procedure returns a status message with affected row counts.
+--   [ ] Full-refresh procedures truncate target tables before loading.
+--   [ ] Incremental procedures are idempotent (re-run same window produces same data).
+--   [ ] SCD2 procedures maintain exactly one active row per natural key.
+--   [ ] No data type overflow or truncation warnings.
+--
+-- 17.2 Mapping #1 — SP_STG_TO_DIM_EMPLOYEES
+--   [ ] Row count equals STG_EMPLOYEES rows WHERE STATUS = 'A'.
+--   [ ] FULL_NAME = FIRST_NAME || ' ' || LAST_NAME.
+--   [ ] No STATUS != 'A' rows in DIM_EMPLOYEES.
+--   [ ] LAST_UPDATED is populated for all rows.
+--
+-- 17.3 Mapping #2 — SP_SALES_PERF_ROUTING
+--   [ ] HIGH_PERFORMERS + STANDARD_PERFORMERS row count equals distinct STORE_ID count.
+--   [ ] All HIGH_PERFORMERS rows have TOTAL_REVENUE >= 100000.
+--   [ ] PROJECTED_BONUS = TOTAL_REVENUE * COALESCE(BONUS_MULTIPLIER, 1).
+--   [ ] TRANSACTION_COUNT matches COUNT of source SALES rows per store.
+--
+-- 17.4 Mapping #3 — SP_CUSTOMER_SCD2
+--   [ ] Each CUSTOMER_ID has exactly one active row (IS_ACTIVE='Y').
+--   [ ] Expired rows have IS_ACTIVE='N' and EFF_END_DATE IS NOT NULL.
+--   [ ] ROW_HASH_MD5 matches MD5 of ADDRESS, PHONE, TIER.
+--   [ ] New customers inserted; changed customers expired and re-inserted; unchanged skipped.
+--
+-- 17.5 Mapping #4 — SP_TXN_STATE_TRACKING
+--   [ ] First transaction per account is always output.
+--   [ ] Consecutive rows with same status for same account are not output.
+--   [ ] All output rows have STATE_CHANGED_FLAG = 1.
+--   [ ] PREV_STATUS matches the previous status for state transitions.
+--
+-- 17.6 Mapping #5 — SP_HIERARCHICAL_XML_GENERATION
+--   [ ] Row count equals count of ORDER_IDs with at least one item.
+--   [ ] XML is well-formed and items ordered by ITEM_ID.
+--   [ ] NULL PRODUCT_SKU rendered as empty <SKU></SKU>.
+--   [ ] ORDER_DATE in ISO 8601 format.
+--
+-- 17.7 Mapping #6 — SP_DYNAMIC_INCREMENTAL_PARTITIONING
+--   [ ] Only rows within [low, high) date window are loaded.
+--   [ ] Re-running same window does not duplicate rows.
+--   [ ] LOAD_TIMESTAMP is populated.
+--
+-- 17.8 Mapping #7 — SP_TRANSACTION_DENORMALIZATION
+--   [ ] One row per INVOICE_ID.
+--   [ ] Totals match conditional SUM of LINE_TYPE categories.
+--   [ ] Unrecognized LINE_TYPE contributes to no total.
+--
+-- 17.9 Mapping #8 — SP_CONDITIONAL_LOOKUP_BYPASS
+--   [ ] Reversed/adjusted rows are in TXN_HIST_LOOKUP.
+--   [ ] All other rows are in TXN_STRAIGHT_THROUGH.
+--   [ ] HIST_LOOKUP ORIGINAL_VAL defaults to AMOUNT when lookup misses.
+--
+-- 17.10 Mapping #9 — SP_MULTI_TARGET_CLEARINGHOUSE
+--   [ ] Each target table contains the correct subset of source rows.
+--   [ ] A row satisfying multiple groups is inserted into each matching target.
+--   [ ] All target tables are truncated before load.
+--
+-- 17.11 Mapping #10 — SP_PRIORITY_DEDUPLICATION
+--   [ ] One row per CUSTOMER_ID in LEADS_PRIORITY.
+--   [ ] The output row has the newest UPDATED_AT.
+--   [ ] Target is fully refreshed.
+--
+-- 17.12 Mapping #11 — SP_SESSION_AUDIT_LEDGER
+--   [ ] All STG_AUDIT_METRICS rows are inserted into AUDIT_LEDGER.
+--   [ ] SESSION_ID is populated for all rows.
+--   [ ] LOAD_TIMESTAMP is populated.
+--
+-- 17.13 Mapping #12 — SP_CASCADING_FALLBACK_LOOKUP
+--   [ ] FINAL_ID = ACTIVE_ID when ACTIVE_ID is not NULL.
+--   [ ] FINAL_ID = ARCHIVE_ID when ACTIVE_ID is NULL and ARCHIVE_ID is not NULL.
+--   [ ] FINAL_ID = -1 when neither lookup matches.
+--
+-- 17.14 Mapping #13 — SP_CRITICAL_EXCEPTION_ABORT
+--   [ ] Procedure raises an exception when any TOTAL_BALANCE < 0.
+--   [ ] When no negative balances, BATCH_VALIDATED contains all rows with 'PASSED'.
+--   [ ] No rows are loaded when validation fails.
+--
+-- ################################################################################
+-- END OF BRD
+-- ################################################################################

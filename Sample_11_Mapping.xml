@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE POWERMART SYSTEM "powermart.dtd">
+<POWERMART CREATION_DATE="06/29/2026 12:15:00" REPOSITORY_VERSION="184.93" PRODUCT_VERSION="10.5.0">
+<REPOSITORY NAME="Rep_Snowflake_Migration" VERSION="184" CODEPAGE="UTF-8" DATABASETYPE="Oracle">
+<FOLDER NAME="MIGRATION_PROJECT" BUSINESSNAME="Informatica to Snowflake Migration" SHARED="NOTSHARED">
+    <MAPPING NAME="m_session_audit_ledger" ISVALID="YES" VERSIONNUMBER="1">
+        <!-- Core ETL Qualifier -->
+        <TRANSFORMATION NAME="SQ_CORE_DATA" TYPE="Source Qualifier" VERSIONNUMBER="1">
+            <TRANSFORMFIELD NAME="METRIC_ID" DATATYPE="integer" PORTTYPE="INPUT/OUTPUT" PRECISION="12"/>
+            <TRANSFORMFIELD NAME="VALUE" DATATYPE="decimal" PORTTYPE="INPUT/OUTPUT" PRECISION="15" SCALE="4"/>
+        </TRANSFORMATION>
+        <!-- Mapping uses pre-session and post-session variable tasks to write to an audit target table -->
+    </MAPPING>
+</FOLDER>
+</REPOSITORY>
+</POWERMART>
